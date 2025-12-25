@@ -3,18 +3,21 @@ import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import type { Memory } from './types';
 
-// Define the structure of our database
+// 1. Update Data interface to include invoices
 interface Data {
     memories: Memory[];
+    invoices: Array<{ invoiceId: string; vendor: string; invoiceDate: string }>;
 }
 
-// Initialize the database adapter
+// 2. Initialize DB with both arrays
 const adapter = new JSONFile<Data>('db.json');
-const db = new Low<Data>(adapter, { memories: [] });
+const db = new Low<Data>(adapter, { memories: [], invoices: [] });
 
 export const initDB = async () => {
     await db.read();
-    db.data ||= { memories: [] }; // Set default data if file is empty
+    db.data ||= { memories: [], invoices: [] };
+    db.data.memories ||= [];
+    db.data.invoices ||= []; // Ensure invoices array exists
     await db.write();
 };
 
@@ -26,12 +29,9 @@ export const getMemories = async (vendor: string): Promise<Memory[]> => {
 export const saveMemory = async (newMemory: Memory) => {
     await db.read();
     const index = db.data!.memories.findIndex(m => m.id === newMemory.id);
-    
     if (index >= 0) {
-        // Update existing memory
         db.data!.memories[index] = newMemory;
     } else {
-        // Create new memory
         db.data!.memories.push(newMemory);
     }
     await db.write();
@@ -41,3 +41,19 @@ export const getAllMemories = async () => {
     await db.read();
     return db.data!.memories;
 }
+
+// 3. New methods for Invoice History
+export const getInvoiceHistory = async () => {
+    await db.read();
+    return db.data!.invoices;
+};
+
+export const saveProcessedInvoice = async (invoice: { invoiceId: string; vendor: string; invoiceDate: string }) => {
+    await db.read();
+    // Prevent saving exact duplicates twice
+    const exists = db.data!.invoices.some(i => i.invoiceId === invoice.invoiceId && i.vendor === invoice.vendor);
+    if (!exists) {
+        db.data!.invoices.push(invoice);
+        await db.write();
+    }
+};

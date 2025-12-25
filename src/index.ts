@@ -1,6 +1,8 @@
 // src/index.ts
-import { initDB, getAllMemories } from './db';
+import { writeFile } from 'fs/promises'; // Import file writer
+import { initDB, getAllMemories, getInvoiceHistory, saveProcessedInvoice } from './db';
 import { recallMemories, applyMemories } from './memory';
+import { findDuplicateInvoice } from './utils';
 import { learnFromCorrection } from './learning';
 import {
     invoiceA1, correctionA1, invoiceA2, invoiceA3, correctionA3,
@@ -14,159 +16,117 @@ const processInvoice = async (
     invoice: ExtractedInvoice,
     stepName: string
 ): Promise<ProcessingResult> => {
-    console.log(`\n${'='.repeat(70)}`);
-    console.log(`STEP ${stepName}: Processing ${invoice.invoiceId} (${invoice.vendor})`);
-    console.log('='.repeat(70));
-
+    // 1. Recall Memories
     const memories = await recallMemories(invoice.vendor);
-    console.log(`Recall: Found ${memories.length} relevant memories`);
 
-    const result = applyMemories(invoice, memories);
-    console.log(`\nStatus: ${result.requiresHumanReview ? 'NEEDS REVIEW' : 'AUTO-APPROVED'}`);
-    console.log(`Confidence: ${(result.confidenceScore * 100).toFixed(1)}%`);
+    // 2. Apply Memories
+    let result = applyMemories(invoice, memories);
 
-    if (result.proposedCorrections.length > 0) {
-        console.log(`\nProposed Corrections:`);
-        result.proposedCorrections.forEach(c => console.log(`  - ${c}`));
+    // 3. DUPLICATE DETECTION
+    const history = await getInvoiceHistory();
+    const duplicateId = findDuplicateInvoice(
+        invoice.invoiceId, 
+        invoice.vendor, 
+        invoice.fields.invoiceDate, 
+        history
+    );
+
+    if (duplicateId) {
+        result.requiresHumanReview = true;
+        result.proposedCorrections.push(`FLAG_DUPLICATE: Possible duplicate of ${duplicateId}`);
+        result.reasoning = `Flagged for review: High similarity to processed invoice ${duplicateId} from same vendor within 7 days.`;
+        result.confidenceScore = 0.0; // Drop confidence to 0 for duplicates
+        
+        result.auditTrail.push({
+            step: 'decide',
+            timestamp: new Date().toISOString(),
+            details: `Duplicate detected matching ${duplicateId}`
+        });
     }
 
-    if (result.memoryUpdates.length > 0) {
-        console.log(`\nMemory Updates:`);
-        result.memoryUpdates.forEach(u => console.log(`  - ${u}`));
+    // 4. Save to History (if not a duplicate)
+    if (!duplicateId) {
+        await saveProcessedInvoice({
+            invoiceId: invoice.invoiceId,
+            vendor: invoice.vendor,
+            invoiceDate: invoice.fields.invoiceDate
+        });
     }
 
-    console.log(`\nReasoning: ${result.reasoning}`);
+    // REMOVED: console.log(JSON.stringify(result, null, 2));
+    // Instead, we just return the result to be collected.
+    console.log(`[Step ${stepName}] Processed ${invoice.invoiceId}`);
+    
     return result;
 };
 
+// Helper to simulate human review in the console (logs only)
 const simulateHumanReview = (invoiceId: string, corrections: any[]) => {
-    console.log(`\n${'~'.repeat(70)}`);
-    console.log(`HUMAN REVIEW: ${invoiceId}`);
-    console.log('~'.repeat(70));
-    console.log('Human corrections applied:');
+    console.error(`\n[Human Review Simulation for ${invoiceId}]`);
     corrections.forEach(c => {
-        console.log(`  - ${c.field}: ${c.from} → ${c.to}`);
-        console.log(`    Reason: ${c.reason}`);
+        console.error(`  - Fixing ${c.field}: ${c.reason}`);
     });
 };
 
 const printMemorySummary = async () => {
     const allMemories = await getAllMemories();
-    console.log(`\n${'='.repeat(70)}`);
-    console.log('MEMORY DATABASE SUMMARY');
-    console.log('='.repeat(70));
-    console.log(`Total Memories: ${allMemories.length}\n`);
-
-    const byVendor = allMemories.reduce((acc, m) => {
-        acc[m.vendor] = (acc[m.vendor] || 0) + 1;
-        return acc;
-    }, {} as Record<string, number>);
-
-    Object.entries(byVendor).forEach(([vendor, count]) => {
-        console.log(`${vendor}: ${count} memories`);
-        const vendorMems = allMemories.filter(m => m.vendor === vendor);
-        vendorMems.forEach(m => {
-            console.log(`  - [${m.type}] ${m.key} (conf: ${m.confidence.toFixed(2)}, hits: ${m.hitCount})`);
-        });
-    });
+    console.error(`\n[Memory DB Summary: ${allMemories.length} records]`);
 };
 
 const runDemo = async () => {
-    console.log('\n');
-    console.log('*'.repeat(70));
-    console.log('*' + ' '.repeat(68) + '*');
-    console.log('*' + '  AI AGENT WITH ADAPTIVE MEMORY - COMPREHENSIVE DEMO'.padEnd(68) + '*');
-    console.log('*' + ' '.repeat(68) + '*');
-    console.log('*'.repeat(70));
-
+    console.error('\n--- STARTING DEMO ---\n');
     await initDB();
 
-    // ========================================
-    // SCENARIO 1: Supplier GmbH - Service Date
-    // ========================================
-    console.log('\n\n');
-    console.log('#'.repeat(70));
-    console.log('# SCENARIO 1: Supplier GmbH - Service Date Extraction Learning');
-    console.log('#'.repeat(70));
+    // Collection array for all outputs
+    const allResults: ProcessingResult[] = [];
 
-    await processInvoice(invoiceA1, '1.1');
+    // SCENARIO 1: Supplier GmbH
+    console.error('\n# Scenario 1: Learning Service Date');
+    allResults.push(await processInvoice(invoiceA1, '1.1'));
+    
     simulateHumanReview('INV-A-001', correctionA1.corrections);
     await learnFromCorrection(correctionA1);
+    
+    allResults.push(await processInvoice(invoiceA2, '1.2'));
 
-    await processInvoice(invoiceA2, '1.2');
-    console.log('\nEXPECTED: Service Date should be auto-extracted using learned pattern');
-
-    // ========================================
-    // SCENARIO 2: Supplier GmbH - PO Matching
-    // ========================================
-    console.log('\n\n');
-    console.log('#'.repeat(70));
-    console.log('# SCENARIO 2: Supplier GmbH - PO Number Matching');
-    console.log('#'.repeat(70));
-
-    await processInvoice(invoiceA3, '2.1');
+    // SCENARIO 2: PO Matching
+    console.error('\n# Scenario 2: PO Matching');
+    allResults.push(await processInvoice(invoiceA3, '2.1'));
+    
     simulateHumanReview('INV-A-003', correctionA3.corrections);
     await learnFromCorrection(correctionA3);
 
-    // ========================================
-    // SCENARIO 3: Parts AG - VAT Included
-    // ========================================
-    console.log('\n\n');
-    console.log('#'.repeat(70));
-    console.log('# SCENARIO 3: Parts AG - VAT Included Recalculation');
-    console.log('#'.repeat(70));
-
-    await processInvoice(invoiceB1, '3.1');
+    // SCENARIO 3: VAT Included
+    console.error('\n# Scenario 3: VAT Calculation');
+    allResults.push(await processInvoice(invoiceB1, '3.1'));
+    
     simulateHumanReview('INV-B-001', correctionB1.corrections);
     await learnFromCorrection(correctionB1);
+    
+    allResults.push(await processInvoice(invoiceB2, '3.2'));
 
-    await processInvoice(invoiceB2, '3.2');
-    console.log('\nEXPECTED: VAT should be detected and recalculated, currency recovered');
-
-    // ========================================
-    // SCENARIO 4: Freight & Co - Skonto & SKU
-    // ========================================
-    console.log('\n\n');
-    console.log('#'.repeat(70));
-    console.log('# SCENARIO 4: Freight & Co - Skonto Terms and SKU Mapping');
-    console.log('#'.repeat(70));
-
-    await processInvoice(invoiceC1, '4.1');
+    // SCENARIO 4: Skonto & SKU
+    console.error('\n# Scenario 4: Skonto & SKU');
+    allResults.push(await processInvoice(invoiceC1, '4.1'));
+    
     simulateHumanReview('INV-C-001', correctionC1.corrections);
     await learnFromCorrection(correctionC1);
+    
+    allResults.push(await processInvoice(invoiceC2, '4.2'));
 
-    await processInvoice(invoiceC2, '4.2');
-    console.log('\nEXPECTED: Skonto terms detected, shipping description mapped to FREIGHT SKU');
+    // SCENARIO 5: Duplicates
+    console.error('\n# Scenario 5: Duplicate Detection');
+    allResults.push(await processInvoice(invoiceA4, '5.1')); 
+    allResults.push(await processInvoice(invoiceB4, '5.2')); // Should flag as duplicate
 
-    // ========================================
-    // SCENARIO 5: Duplicate Detection
-    // ========================================
-    console.log('\n\n');
-    console.log('#'.repeat(70));
-    console.log('# SCENARIO 5: Duplicate Invoice Detection');
-    console.log('#'.repeat(70));
-
-    await processInvoice(invoiceA4, '5.1');
-    const result = await processInvoice(invoiceB4, '5.2');
-
-    if (invoiceA4.invoiceId === invoiceB4.invoiceId &&
-        invoiceA4.vendor === invoiceB4.vendor) {
-        console.log('\nWARNING: Potential duplicate detected!');
-        console.log(`Invoice ${invoiceB4.invoiceId} from ${invoiceB4.vendor} may be a duplicate`);
-    }
-
-    // ========================================
-    // FINAL SUMMARY
-    // ========================================
     await printMemorySummary();
 
-    console.log('\n\n');
-    console.log('*'.repeat(70));
-    console.log('*' + ' '.repeat(68) + '*');
-    console.log('*' + '  DEMO COMPLETE - System has learned and applied patterns!'.padEnd(68) + '*');
-    console.log('*' + ' '.repeat(68) + '*');
-    console.log('*'.repeat(70));
-    console.log('\n');
+    // WRITE OUTPUT TO FILE
+    console.error('\nWriting results to output.json...');
+    await writeFile('output.json', JSON.stringify(allResults, null, 2));
+    console.error('Done! Check output.json for the full report.');
+    
+    console.error('\n--- DEMO COMPLETE ---');
 };
 
 runDemo().catch(console.error);

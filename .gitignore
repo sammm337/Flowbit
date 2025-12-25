@@ -9,6 +9,7 @@ db.json
 src/test_setup.ts
 src/test_memory.ts
 src/test_learning.ts
+output.json
 
 .env
 
