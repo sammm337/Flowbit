@@ -3,7 +3,7 @@ import { saveMemory, getMemories } from './db';
 import type { HumanCorrection, Memory, MemoryPattern, RegexPattern } from './types';
 
 export const learnFromCorrection = async (correction: HumanCorrection) => {
-    console.log(`\n🧠 Learning from correction for ${correction.vendor}...`);
+    console.log(`\n Learning from correction for ${correction.vendor}...`);
     
     const existingMemories = await getMemories(correction.vendor);
 
@@ -61,7 +61,7 @@ const processCorrection = async (
     const memoryKey = mapFieldToMemoryKey(item.field, item.reason);
     
     if (!memoryKey) {
-        console.log(`   ⚠️ Skipping unknown field: ${item.field}`);
+        console.log(`    Skipping unknown field: ${item.field}`);
         return;
     }
 
@@ -80,7 +80,7 @@ const processCorrection = async (
         };
         
         await saveMemory(existingMemory);
-        console.log(`   ✅ Reinforced memory [${memoryKey}]. New confidence: ${existingMemory.confidence.toFixed(2)}`);
+        console.log(`    Reinforced memory [${memoryKey}]. New confidence: ${existingMemory.confidence.toFixed(2)}`);
     } else {
         // New learning
         const newMemory: Memory = {
