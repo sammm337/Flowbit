@@ -6,7 +6,7 @@ export interface LineItem {
     description?: string;
     qty: number;
     unitPrice: number;
-    qtyDelivered?: number; // From delivery note
+    qtyDelivered?: number;
 }
 
 export interface InvoiceFields {
@@ -20,6 +20,8 @@ export interface InvoiceFields {
     taxTotal: number;
     grossTotal: number;
     lineItems: LineItem[];
+    vatIncluded?: boolean;
+    paymentTerms?: string | null;
 }
 
 export interface ExtractedInvoice {
@@ -30,21 +32,46 @@ export interface ExtractedInvoice {
     rawText: string;
 }
 
-// 2. Memory Structures (The Brain)
+// 2. Enhanced Memory Structures
 export type MemoryType = 'vendor-pattern' | 'correction' | 'resolution';
+
+export interface MemoryPattern {
+    type: 'regex' | 'static' | 'rule';
+    value: string | RegexPattern | Rule;
+}
+
+export interface RegexPattern {
+    pattern: string;
+    flags?: string;
+    captureGroup?: number;
+    transform?: string; // e.g., 'parseGermanDate', 'uppercase'
+}
+
+export interface Rule {
+    condition: string;
+    action: string;
+    params?: any;
+}
 
 export interface Memory {
     id: string;
     type: MemoryType;
-    vendor: string; // Memories are usually tied to a specific vendor
-    key: string;    // e.g., "serviceDate_extraction" or "tax_calculation"
-    value: any;     // The learned value/rule (e.g., regex pattern, or specific SKU map)
-    confidence: number; // 0.0 to 1.0 - How sure are we about this memory?
-    lastUsed: string;   // ISO Date
-    hitCount: number;   // How many times was this memory useful?
+    vendor: string;
+    key: string;
+    pattern: MemoryPattern;
+    confidence: number;
+    lastUsed: string;
+    hitCount: number;
+    successCount: number;
+    failureCount: number;
+    metadata?: {
+        createdFrom?: string; // invoiceId that created this memory
+        humanVerified?: boolean;
+        notes?: string;
+    };
 }
 
-// 3. Output Contract (Required by Assignment)
+// 3. Output Contract
 export interface ProcessingResult {
     invoiceId: string;
     normalizedInvoice: InvoiceFields;
@@ -52,7 +79,7 @@ export interface ProcessingResult {
     requiresHumanReview: boolean;
     reasoning: string;
     confidenceScore: number;
-    memoryUpdates: string[]; // Descriptions of what we learned/updated
+    memoryUpdates: string[];
     auditTrail: AuditLog[];
 }
 
@@ -62,7 +89,7 @@ export interface AuditLog {
     details: string;
 }
 
-// 4. Human Correction Input (For Training)
+// 4. Human Correction Input
 export interface HumanCorrection {
     invoiceId: string;
     vendor: string;
@@ -74,3 +101,11 @@ export interface HumanCorrection {
     }[];
     finalDecision: 'approved' | 'rejected';
 }
+
+// 5. Decision thresholds
+export const THRESHOLDS = {
+    AUTO_APPROVE: 0.85,
+    AUTO_CORRECT: 0.70,
+    MEMORY_APPLICATION: 0.70,
+    MEMORY_DECAY_RATE: 0.05
+};

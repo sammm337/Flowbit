@@ -1,99 +1,225 @@
 // src/memory.ts
-import { getMemories } from './db';
-import type { ExtractedInvoice, ProcessingResult, InvoiceFields, Memory, AuditLog } from './types';
-import _ from 'lodash'; // Helpful for deep cloning objects
+import { getMemories, saveMemory } from './db';
+import { extractWithRegex, calculateTaxInclusive } from './utils';
+import type { 
+    ExtractedInvoice, 
+    ProcessingResult, 
+    InvoiceFields, 
+    Memory, 
+    AuditLog 
+} from './types';
+import { THRESHOLDS } from './types';
+import _ from 'lodash';
 
-// 1. RECALL: Fetch relevant knowledge
 export const recallMemories = async (vendor: string): Promise<Memory[]> => {
     return await getMemories(vendor);
 };
 
-// 2. APPLY: Use knowledge to fix the invoice
 export const applyMemories = (
     invoice: ExtractedInvoice,
     memories: Memory[]
 ): ProcessingResult => {
-    // Start with a clean clone of the extracted fields
-    // We use cloneDeep so we don't accidentally mess up the original raw data
     const normalizedInvoice: InvoiceFields = _.cloneDeep(invoice.fields);
-    
     const proposedCorrections: string[] = [];
+    const memoryUpdates: string[] = [];
     const auditTrail: AuditLog[] = [];
-    let requiresHumanReview = false;
-    let confidenceScore = invoice.confidence; // Start with the OCR confidence
+    let confidenceScore = invoice.confidence;
 
-    // Log the initial state
     auditTrail.push({
         step: 'recall',
         timestamp: new Date().toISOString(),
         details: `Fetched ${memories.length} memories for vendor: ${invoice.vendor}`
     });
 
-    // Sort memories by confidence (highest first) so strong memories override weak ones
+    // Sort by confidence (highest first)
     const sortedMemories = memories.sort((a, b) => b.confidence - a.confidence);
 
     for (const memory of sortedMemories) {
-        // We only apply memories if they are confident enough (e.g., > 70%)
-        if (memory.confidence < 0.7) continue;
+        // Only apply high-confidence memories
+        if (memory.confidence < THRESHOLDS.MEMORY_APPLICATION) {
+            continue;
+        }
 
         let applied = false;
+        let extracted: any = null;
 
-        // --- Logic for different Memory Keys ---
-        
-        // Example 1: The Vendor usually sends a specific Currency (e.g., "EUR")
-        if (memory.key === 'currency_fix' && normalizedInvoice.currency !== memory.value) {
-            const oldValue = normalizedInvoice.currency;
-            normalizedInvoice.currency = memory.value;
-            proposedCorrections.push(`Updated Currency from ${oldValue} to ${memory.value}`);
-            applied = true;
-        }
+        // Apply based on memory key and pattern type
+        switch (memory.key) {
+            case 'serviceDate_extraction':
+                if (!normalizedInvoice.serviceDate && memory.pattern.type === 'regex') {
+                    extracted = extractWithRegex(invoice.rawText, memory.pattern.value as any);
+                    if (extracted) {
+                        normalizedInvoice.serviceDate = extracted;
+                        proposedCorrections.push(
+                            `Extracted Service Date: ${extracted} (from Leistungsdatum pattern)`
+                        );
+                        applied = true;
+                    }
+                }
+                break;
 
-        // Example 2: The Vendor's "Service Date" is often missed by OCR
-        if (memory.key === 'serviceDate_fill' && !normalizedInvoice.serviceDate) {
-            // In a real app, 'value' might be a regex or a complex rule. 
-            // For this demo, we assume the memory holds a hardcoded date or logic instruction.
-            // Let's pretend the memory value is the date itself for simplicity in this step.
-            normalizedInvoice.serviceDate = memory.value;
-            proposedCorrections.push(`Filled missing Service Date with ${memory.value}`);
-            applied = true;
-        }
+            case 'currency_recovery':
+                if (!normalizedInvoice.currency && memory.pattern.type === 'regex') {
+                    extracted = extractWithRegex(invoice.rawText, memory.pattern.value as any);
+                    if (extracted) {
+                        normalizedInvoice.currency = extracted;
+                        proposedCorrections.push(`Recovered Currency: ${extracted}`);
+                        applied = true;
+                    }
+                }
+                break;
 
-        // Example 3: Tax Rate Correction
-        if (memory.key === 'taxRate_fix' && normalizedInvoice.taxRate !== memory.value) {
-            normalizedInvoice.taxRate = memory.value;
-            // Re-calculate tax total based on new rate
-            const newTaxTotal = normalizedInvoice.netTotal * memory.value;
-            proposedCorrections.push(`Adjusted Tax Rate to ${memory.value * 100}% and recalculated Tax Total`);
-            normalizedInvoice.taxTotal = Number(newTaxTotal.toFixed(2));
-            applied = true;
+            case 'vat_included_detection':
+                if (memory.pattern.type === 'regex') {
+                    const match = new RegExp((memory.pattern.value as any).pattern, 'i').test(invoice.rawText);
+                    if (match) {
+                        normalizedInvoice.vatIncluded = true;
+                        const recalc = calculateTaxInclusive(
+                            normalizedInvoice.grossTotal,
+                            normalizedInvoice.taxRate
+                        );
+                        normalizedInvoice.netTotal = recalc.netTotal;
+                        normalizedInvoice.taxTotal = recalc.taxTotal;
+                        proposedCorrections.push(
+                            `Detected VAT-inclusive pricing. Recalculated: Net=${recalc.netTotal}, Tax=${recalc.taxTotal}`
+                        );
+                        applied = true;
+                    }
+                }
+                break;
+
+            case 'po_matching':
+                if (!normalizedInvoice.poNumber && memory.pattern.type === 'regex') {
+                    extracted = extractWithRegex(invoice.rawText, memory.pattern.value as any);
+                    if (extracted) {
+                        normalizedInvoice.poNumber = extracted;
+                        proposedCorrections.push(`Matched PO Number: ${extracted}`);
+                        applied = true;
+                    }
+                }
+                break;
+
+            case 'skonto_terms':
+                if (memory.pattern.type === 'regex') {
+                    extracted = extractWithRegex(invoice.rawText, memory.pattern.value as any);
+                    if (extracted) {
+                        normalizedInvoice.paymentTerms = extracted;
+                        proposedCorrections.push(`Detected Skonto terms: ${extracted}`);
+                        applied = true;
+                    }
+                }
+                break;
+
+            case 'sku_mapping':
+                // Map description to SKU for line items
+                if (memory.pattern.type === 'rule') {
+                    const rule = memory.pattern.value as any;
+                    normalizedInvoice.lineItems.forEach(item => {
+                        if (!item.sku && item.description?.toLowerCase().includes(rule.keyword)) {
+                            item.sku = rule.mappedSku;
+                            proposedCorrections.push(
+                                `Mapped "${item.description}" to SKU: ${rule.mappedSku}`
+                            );
+                            applied = true;
+                        }
+                    });
+                }
+                break;
         }
 
         if (applied) {
+            // Update memory statistics
+            memory.successCount++;
+            memory.lastUsed = new Date().toISOString();
+            memory.hitCount++;
+            
+            // Boost confidence slightly on successful application
+            memory.confidence = Math.min(1.0, memory.confidence + 0.02);
+            
+            saveMemory(memory); // Save updated stats
+            
+            memoryUpdates.push(
+                `Applied memory [${memory.key}] with confidence ${memory.confidence.toFixed(2)}`
+            );
+            
             auditTrail.push({
                 step: 'apply',
                 timestamp: new Date().toISOString(),
                 details: `Applied memory [${memory.key}]: ${proposedCorrections[proposedCorrections.length - 1]}`
             });
-            // Slightly boost confidence if we successfully applied a trusted memory
-            confidenceScore = Math.min(1.0, confidenceScore + 0.05);
+
+            // Boost overall confidence when we successfully apply memories
+            confidenceScore = Math.min(1.0, confidenceScore + 0.03);
         }
     }
 
-    // Heuristic: If we made corrections, we might want a human to check it initially
-    if (proposedCorrections.length > 0) {
-        requiresHumanReview = true;
-    }
+    // Decision logic
+    const requiresHumanReview = decideReviewNeed(
+        normalizedInvoice,
+        confidenceScore,
+        proposedCorrections.length
+    );
+
+    auditTrail.push({
+        step: 'decide',
+        timestamp: new Date().toISOString(),
+        details: requiresHumanReview 
+            ? `Flagged for review. Confidence: ${confidenceScore.toFixed(2)}`
+            : `Auto-approved. Confidence: ${confidenceScore.toFixed(2)}`
+    });
+
+    const reasoning = generateReasoning(
+        proposedCorrections,
+        confidenceScore,
+        requiresHumanReview
+    );
 
     return {
         invoiceId: invoice.invoiceId,
         normalizedInvoice,
         proposedCorrections,
         requiresHumanReview,
-        reasoning: proposedCorrections.length > 0 
-            ? `Applied ${proposedCorrections.length} corrections based on past vendor behavior.` 
-            : "No relevant memories found to improve extraction.",
+        reasoning,
         confidenceScore,
-        memoryUpdates: [], // We will handle 'Learning' in Phase 3
+        memoryUpdates,
         auditTrail
     };
+};
+
+const decideReviewNeed = (
+    invoice: InvoiceFields,
+    confidence: number,
+    correctionCount: number
+): boolean => {
+    // Auto-approve if high confidence and all critical fields present
+    if (confidence >= THRESHOLDS.AUTO_APPROVE && 
+        invoice.invoiceNumber &&
+        invoice.currency &&
+        invoice.grossTotal > 0) {
+        return false;
+    }
+
+    // Auto-correct zone: medium confidence with known patterns
+    if (confidence >= THRESHOLDS.AUTO_CORRECT && correctionCount > 0 && correctionCount <= 2) {
+        return false;
+    }
+
+    // Otherwise, needs review
+    return true;
+};
+
+const generateReasoning = (
+    corrections: string[],
+    confidence: number,
+    needsReview: boolean
+): string => {
+    if (corrections.length === 0) {
+        return `No vendor-specific patterns applied. Confidence: ${(confidence * 100).toFixed(1)}%. ${needsReview ? 'Requires review due to missing critical fields.' : 'Auto-approved.'}`;
+    }
+
+    const correctionSummary = corrections.length === 1 
+        ? '1 correction' 
+        : `${corrections.length} corrections`;
+
+    return `Applied ${correctionSummary} based on learned vendor patterns. Confidence: ${(confidence * 100).toFixed(1)}%. ${needsReview ? 'Flagged for human verification.' : 'Auto-approved based on high confidence.'}`;
 };
