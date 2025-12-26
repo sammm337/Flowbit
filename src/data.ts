@@ -1,4 +1,4 @@
-// src/data.ts
+
 import type { ExtractedInvoice, HumanCorrection } from './types';
 
 // ============================================

@@ -49,7 +49,7 @@ const storeResolutionMemory = async (
             }
         };
         await saveMemory(newResolution);
-        console.log(`   ✨ Created resolution memory: ${resolutionKey}`);
+        console.log(`    Created resolution memory: ${resolutionKey}`);
     }
 };
 
